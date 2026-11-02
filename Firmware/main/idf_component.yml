@@ -1,0 +1,3 @@
+dependencies:
+  espressif/i2c_bus: "==1.5.2"
+  francisduvivier/bme68x_sensorapi_espidf: "==0.0.6"
