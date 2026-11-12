@@ -1,0 +1,3 @@
+# Directorios generados por CMake, ESP-IDF, Ninja y otros sistemas de build.
+# No incluir estos artefactos en commits; se regeneran al compilar.
+**/build/

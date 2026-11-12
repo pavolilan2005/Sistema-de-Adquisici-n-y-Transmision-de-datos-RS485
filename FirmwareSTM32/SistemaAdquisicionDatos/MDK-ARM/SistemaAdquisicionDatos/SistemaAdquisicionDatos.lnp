@@ -1,0 +1,26 @@
+--cpu=Cortex-M4.fp.sp
+"sistemaadquisiciondatos\startup_stm32f411xe.o"
+"sistemaadquisiciondatos\main.o"
+"sistemaadquisiciondatos\stm32f4xx_it.o"
+"sistemaadquisiciondatos\stm32f4xx_hal_msp.o"
+"sistemaadquisiciondatos\stm32f4xx_hal_i2c.o"
+"sistemaadquisiciondatos\stm32f4xx_hal_i2c_ex.o"
+"sistemaadquisiciondatos\stm32f4xx_hal_rcc.o"
+"sistemaadquisiciondatos\stm32f4xx_hal_rcc_ex.o"
+"sistemaadquisiciondatos\stm32f4xx_hal_flash.o"
+"sistemaadquisiciondatos\stm32f4xx_hal_flash_ex.o"
+"sistemaadquisiciondatos\stm32f4xx_hal_flash_ramfunc.o"
+"sistemaadquisiciondatos\stm32f4xx_hal_gpio.o"
+"sistemaadquisiciondatos\stm32f4xx_hal_dma_ex.o"
+"sistemaadquisiciondatos\stm32f4xx_hal_dma.o"
+"sistemaadquisiciondatos\stm32f4xx_hal_pwr.o"
+"sistemaadquisiciondatos\stm32f4xx_hal_pwr_ex.o"
+"sistemaadquisiciondatos\stm32f4xx_hal_cortex.o"
+"sistemaadquisiciondatos\stm32f4xx_hal.o"
+"sistemaadquisiciondatos\stm32f4xx_hal_exti.o"
+"sistemaadquisiciondatos\stm32f4xx_hal_uart.o"
+"sistemaadquisiciondatos\system_stm32f4xx.o"
+--strict --scatter "SistemaAdquisicionDatos\SistemaAdquisicionDatos.sct"
+--summary_stderr --info summarysizes --map --load_addr_map_info --xref --callgraph --symbols
+--info sizes --info totals --info unused --info veneers
+--list "SistemaAdquisicionDatos.map" -o SistemaAdquisicionDatos\SistemaAdquisicionDatos.axf
