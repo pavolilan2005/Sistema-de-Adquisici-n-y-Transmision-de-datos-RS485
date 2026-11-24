@@ -1,4 +1,5 @@
 /* USER CODE BEGIN Header */
+/* Firmware ASTRA-I v1.0.3: heartbeat de PC13 desde SysTick. */
 /**
   ******************************************************************************
   * @file    stm32f4xx_it.c
@@ -187,6 +188,7 @@ void SysTick_Handler(void)
   /* USER CODE END SysTick_IRQn 0 */
   HAL_IncTick();
   /* USER CODE BEGIN SysTick_IRQn 1 */
+  HAL_SYSTICK_IRQHandler();
 
   /* USER CODE END SysTick_IRQn 1 */
 }

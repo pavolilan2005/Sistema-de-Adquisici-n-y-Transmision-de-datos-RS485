@@ -1,0 +1,31 @@
+# Doxygen configuration — STM32F411 node 1
+PROJECT_NAME           = "ASTRA I - Nodo 1 STM32F411"
+PROJECT_NUMBER         = "1.0.4"
+PROJECT_BRIEF          = "Adquisición MPU6050/BME680 y enlace RS-485 binario"
+OUTPUT_DIRECTORY       = docs/doxygen
+
+INPUT                  = Core/Inc Core/Src README.md
+FILE_PATTERNS          = *.h *.c *.md
+RECURSIVE              = YES
+EXCLUDE                = Core/Inc/bme68x.h Core/Inc/bme68x_defs.h Core/Src/bme68x.c
+EXCLUDE_PATTERNS       = */Drivers/* */MDK-ARM/*
+EXTRACT_ALL            = YES
+EXTRACT_STATIC         = YES
+OPTIMIZE_OUTPUT_FOR_C  = YES
+JAVADOC_AUTOBRIEF      = YES
+MARKDOWN_SUPPORT       = YES
+INPUT_ENCODING         = UTF-8
+USE_MDFILE_AS_MAINPAGE = README.md
+
+GENERATE_HTML          = YES
+HTML_OUTPUT            = html
+GENERATE_LATEX         = NO
+GENERATE_MAN           = NO
+GENERATE_RTF           = NO
+GENERATE_XML           = NO
+GENERATE_TREEVIEW      = YES
+
+QUIET                  = YES
+WARN_IF_UNDOCUMENTED   = YES
+WARN_IF_DOC_ERROR      = YES
+WARN_NO_PARAMDOC       = NO

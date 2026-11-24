@@ -5,4 +5,4 @@
 cmake_minimum_required(VERSION 3.16)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(nodo2_esp32 VERSION 1.0.1)
+project(nodo2_esp32 VERSION 1.0.3)

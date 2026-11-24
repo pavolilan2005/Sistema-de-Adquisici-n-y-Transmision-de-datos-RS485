@@ -1,67 +1,53 @@
-# Protocolo y Keil Watch
+# Protocolo binario y variables de Keil Watch
 
-## Trama RS485 del STM32
+Esta guía describe el enlace entre el nodo 1 (STM32F411CEU6) y el nodo 2 (ESP32). Los campos y escalas completos también están definidos en [`FirmwareESP32/PROTOCOLO_BINARIO.md`](../FirmwareESP32/PROTOCOLO_BINARIO.md) y en `FirmwareSTM32/SistemaAdquisicionDatos/Core/Inc/telemetry_protocol.h`.
 
-El STM32 forma primero el cuerpo sin delimitadores:
+## Paquete STM32 → gateway
 
-```text
-D,seq,ax_mg,ay_mg,az_mg,gx_mdps,gy_mdps,gz_mdps,mpu_temp_centiC,pres_Pa,bme_temp_centiC,hum_milliPct,gas_ohm
-```
+El STM32 envía **32 bytes binarios** por USART1 a 115200 8N1. No se trata de texto CSV: no contiene `$`, comas, `*`, CR ni LF. Los dos extremos usan el mismo formato y CRC-8/ATM.
 
-Despues calcula XOR byte a byte sobre ese cuerpo y transmite:
+| Offset | Longitud | Campo | Representación |
+|---:|---:|---|---|
+| 0–1 | 2 | Sincronía | `A5 5A` |
+| 2 | 1 | Versión | `0x01` |
+| 3 | 1 | Tipo | `0x01` datos |
+| 4 | 1 | Secuencia | `uint8`, wrap 255→0 |
+| 5 | 1 | Flags | bit 0 MPU válido; bit 1 BME válido |
+| 6–17 | 12 | Aceleración XYZ y giro XYZ | `int16` big-endian, escalas Q14/Q7 |
+| 18–21 | 4 | Temperatura MPU y BME | `int16` Q8.8, °C = entero / 256 |
+| 22–24 | 3 | Presión BME | `uint24` big-endian, Pa enteros |
+| 25–26 | 2 | Humedad BME | `uint16` Q8.8, %RH = entero / 256 |
+| 27–30 | 4 | Resistencia de gas | `uint32` big-endian, Ω |
+| 31 | 1 | CRC-8/ATM | cubre offsets 2–30 |
 
-```text
-$D,seq,...,gas_ohm*XX\r\n
-```
+La aceleración se recupera como entero con signo / 16384 para obtener g. El giro se recupera como entero con signo / 128 para obtener °/s. Los sensores no válidos se identifican con flags; sus ceros no son mediciones.
 
-`XX` es hexadecimal de dos digitos. El nodo 2 descarta la trama si no inicia con `$`, no contiene `*`, el XOR no coincide o la secuencia no cabe en un byte.
+### Parámetros CRC-8/ATM
 
-| Campo | Unidad transmitida | Conversión |
-|---|---|---|
-| `seq` | 0–255 | secuencia de 8 bits, wrap a cero |
-| `ax_mg`, `ay_mg`, `az_mg` | mg | dividir entre 1000 para obtener g |
-| `gx_mdps`, `gy_mdps`, `gz_mdps` | mdps | dividir entre 1000 para obtener grados/s |
-| `mpu_temp_centiC` | centi-°C | dividir entre 100 para obtener °C |
-| `pres_Pa` | Pa | reservada, actualmente cero |
-| `bme_temp_centiC` | centi-°C | reservada, actualmente cero |
-| `hum_milliPct` | milésimas de % | reservada, actualmente cero |
-| `gas_ohm` | ohmios | reservada, actualmente cero |
+- Polinomio normal: `0x07`.
+- Valor inicial: `0x00`.
+- RefIn: no; RefOut: no.
+- XOR final: `0x00`.
+- Trama de datos: bytes 2 a 30 inclusive; se excluyen sincronía y byte CRC.
+- ACK: bytes 2 a 4 inclusive.
 
-## ACK
+## ACK gateway → STM32
 
-El gateway responde al STM32 inmediatamente después de validar la trama:
+El ACK ocupa seis bytes: `A5 5A 01 80 secuencia crc`. El tipo `0x80` identifica ACK. El STM32 solo lo toma como válido si la sincronía, tipo, secuencia y CRC corresponden a la trama transmitida. Timeout: 300 ms. PB12 parpadea al reconocer el ACK; PB13 indica transmisión.
 
-```text
-$A,seq,OK\r\n
-```
+El ACK RS-485 confirma únicamente la recepción/validación del gateway. El ACK LoRa que devuelve el nodo 3 es otro mensaje y confirma el siguiente salto.
 
-El STM32 espera hasta 300 ms y compara la secuencia recibida con la transmitida. El LED RX PB12 pulsa 100 ms solo ante un ACK válido de esa secuencia.
+## Revisión en Keil Watch
 
-El gateway posteriormente retransmite la muestra por LoRa. El ACK RS485 confirma la recepción en el gateway; el ACK LoRa confirma el salto a la estación. La tarea LoRa acepta `$A,seq,OK` o `ACK,seq,OK` cuando la secuencia coincide.
+Añade estas variables, manteniendo el target en Run:
 
-## Variables para Keil Watch
+- Funcionamiento: `watch_heartbeat_count`, `watch_sensor_count`, `watch_sensor_error_count`.
+- Estado de sensores: `watch_mpu_ok`, `watch_bme_ok`, `watch_bme_data_valid`, `watch_bme_gas_valid`, `watch_bme_retry_count`.
+- Valores físicos: `accel_x_g`, `accel_y_g`, `accel_z_g`, `gyro_x_dps`, `gyro_y_dps`, `gyro_z_dps`, `mpu_temperature_c`, `bme_temperature_c`, `bme_pressure_pa_float`, `bme_humidity_pct`, `bme_gas_ohms`.
+- Enlace: `sequence_number`, `watch_last_sequence`, `watch_last_ack_ok`, `watch_ack_count`, `watch_timeout_count`, `watch_bad_ack_count`.
+- Tramas: `watch_last_frame_flags`, `watch_last_crc`, `watch_tx_frame`, `watch_rx_frame`.
+- Corrupción controlada: `watch_corrupt_next_frame`, `watch_corrupt_frame_count`.
 
-| Variable | Qué observar | Valor esperado |
-|---|---|---|
-| `watch_heartbeat_count` | actividad de PC13 | aumenta aproximadamente cada 200 ms |
-| `watch_mpu_ok` | resultado de WHO_AM_I | `1` si el ID del MPU6050 es `0x68` |
-| `watch_sensor_count` | ciclo de adquisición | aumenta aproximadamente cada segundo |
-| `watch_sensor_error_count` | fallos de MPU6050 | permanece en cero en operación normal |
-| `accel_x_mg`, `accel_y_mg`, `accel_z_mg` | aceleración procesada | alrededor de ±1000 mg por eje según orientación |
-| `gyro_x_mdps`, `gyro_y_mdps`, `gyro_z_mdps` | giroscopio procesado | cerca de cero con la placa quieta |
-| `mpu_temp_centi_c` | temperatura MPU | centi-°C, dividir entre 100 |
-| `sequence_number`, `watch_last_sequence` | contador transmitido | incrementa modulo 256 tras una adquisición válida |
-| `watch_tx_frame` | última trama TX | inicia `$D,` y contiene `*XX` y CR/LF |
-| `watch_last_ack_ok` | ACK de la secuencia actual | `1` solo si secuencia y texto coinciden |
-| `watch_ack_count` | ACK válidos acumulados | incrementa por cada respuesta correcta |
-| `watch_timeout_count` | errores TX/timeout ACK | estable si RS485 responde normalmente |
-| `watch_rx_line` | última respuesta completa | `$A,<seq>,OK` |
-| `bme_pressure_pa`, `bme_temperature_centi_c`, `bme_humidity_milli_pct`, `bme_gas_ohms` | campos BME reservados | permanecen en cero en este firmware |
+La prueba de corrupción altera un bit después de calcular el CRC. El gateway debe descartarla, no confirmar esa secuencia y aumentar el contador de errores; el siguiente paquete válido debe continuar el flujo. La prueba se verificó con publicación activa a ThingSpeak.
 
-`watch_tx_frame` y `watch_rx_line` son arreglos `volatile`; Keil puede mostrarlos como bytes o caracteres. Mantén el target en Run para que los contadores se actualicen.
-
-## Estado del ESP32 nodo 2
-
-En el monitor serie se esperan los mensajes `SX1278 VERSION=0x12`, `Trama STM32 válida, secuencia=N`, el envío LoRa y el resultado del ACK del nodo 3.
-
-Contadores de `main.c`: `rs485_valid_frames`, `rs485_ack_sent`, `rs485_ack_errors`, `lora_frames_replaced`, `lora_ack_received`, `lora_ack_timeouts` y `lora_tx_errors`.
+Para monitorear ESP32 usa el monitor serial de ESP-IDF y los dos dashboards de ThingSpeak; Keil Watch no inspecciona las variables de esos nodos.

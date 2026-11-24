@@ -1,6 +1,7 @@
 # Configuración Doxygen del firmware transmisor LoRa.
 DOXYFILE_ENCODING      = UTF-8
 PROJECT_NAME           = "Transmisor LoRa ESP32"
+PROJECT_NUMBER         = "1.0.3"
 PROJECT_BRIEF          = "Firmware ESP-IDF 6.1 con SX1278, MPU6050 y BME680"
 OUTPUT_DIRECTORY       = docs
 CREATE_SUBDIRS         = NO

@@ -1,92 +1,113 @@
-# Sistema de adquisición y transmisión de datos
+# Sistema ASTRA I: adquisición, telemetría y estación terrena
 
-Documentación de los dos firmwares incluidos en esta carpeta. Versiones documentales actuales: STM32 **1.0.1** y gateway ESP32 **1.0.1**.
+Sistema embebido de tres nodos para adquirir variables ambientales y de movimiento, protegerlas con CRC-8, transportarlas mediante UART/RS-485 y LoRa, y visualizarlas localmente y en ThingSpeak.
+
+> **Estado:** integración de los tres nodos comprobada por el autor. La publicación a ThingSpeak y la prueba controlada de una trama RS-485 corrupta también fueron verificadas. Las claves de Wi-Fi y ThingSpeak se configuran localmente y no se incluyen en el repositorio.
 
 ## Arquitectura
 
 ```text
-MPU6050 ─I2C1─┐
-              ├─ STM32F411 ─ USART1 ─ MAX485 ═ RS485 ═ MAX485 ─ UART2 ─ ESP32 nodo 2
-BME680 (pendiente)┘                                              │
-                                                                  └─ SPI2 ─ SX1278 ))) LoRa ))) estación nodo 3
+MPU6050 + BME680
+       │ I²C1
+       ▼
+Nodo 1: STM32F411CEU6
+       │ UART1 + MAX485 / RS-485, 115200 8N1
+       ▼
+Nodo 2: ESP32 DevKit V1 + MAX485
+       ├── ACK RS-485 al nodo 1
+       ├── SPI2 → SX1278 → LoRa 433 MHz
+       └── Wi-Fi estación → ThingSpeak (2 canales)
+                              │
+                       ACK LoRa de retorno
+                              │
+                              ▼
+Nodo 3: ESP32 + SX1278 + TFT ST7789
+       ├── TFT vertical, LEDs de enlace/aviso/error
+       └── Punto de acceso local + dashboard HTTP/JSON
 ```
 
-El STM32 mide el MPU6050 y envía una trama por RS485. El gateway responde el ACK RS485 al recibir una trama válida, la conserva en una cola de una muestra y después la retransmite por LoRa. El gateway espera un ACK de la estación terrena antes de dar por confirmado el salto LoRa. En esta carpeta no está incluido el firmware de la estación nodo 3.
+El nodo 2 confirma por RS-485 una trama válida sin esperar el salto LoRa. El nodo 3 devuelve una confirmación LoRa independiente. ThingSpeak se publica en paralelo desde el nodo 2; el dashboard del nodo 3 funciona en la red local del punto de acceso.
 
-## Firmware STM32F411
+## Nodos y carpetas
 
-Proyecto STM32CubeMX/Keil: `FirmwareSTM32/SistemaAdquisicionDatos/SistemaAdquisicionDatos.ioc` y `MDK-ARM/SistemaAdquisicionDatos.uvprojx`.
-
-### Pines y periféricos
-
-| Función | Pin STM32 |
+| Carpeta | Contenido |
 |---|---|
-| I2C1 SCL / SDA | PB6 / PB7 |
-| USART1 TX / RX hacia MAX485 | PA9 / PA10 |
-| MAX485 DE / `/RE` | PA2 / PA1 |
-| LED RX de ACK | PB12 |
-| LED TX RS485 | PB13 |
-| Heartbeat | PC13 |
+| `FirmwareSTM32/SistemaAdquisicionDatos` | Proyecto STM32CubeMX y Keil para el nodo 1. |
+| `FirmwareESP32` | Proyecto ESP-IDF 6.1 para el gateway RS-485/LoRa y la publicación ThingSpeak del nodo 2. |
+| [`Firmware_EstacionTerrena`](https://github.com/pavolilan2005/EstacionTerrena/tree/main/Firmware_EstacionTerrena) | Firmware ESP-IDF 6.1 del nodo 3, pantalla TFT y servidor web local. Está en el repositorio separado de estación terrena. |
+| `PCBs` | Esquemático y diseño KiCad de la PCB que integra los nodos 1 y 2; se separa físicamente en dos módulos. |
+| `Gerbers` | Archivos de fabricación exportados de la PCB de nodos 1 y 2. |
+| `Anexos` | Imágenes de esquemático, PCB, vistas 3D y diagrama de conexión. |
+| `docs` | Especificación de trama y guía de variables para Keil Watch. |
 
-I2C1 trabaja a 100 kHz; USART1 trabaja a 115200, 8N1. El MPU6050 está configurado con AD0 a GND (dirección `0x68`), rango de acelerómetro ±2 g y giroscopio ±250 °/s.
+El repositorio [EstacionTerrena](https://github.com/pavolilan2005/EstacionTerrena) contiene el diseño, Gerbers, modelos 3D y firmware del tercer nodo.
 
-**BME680:** este firmware aún no lo inicializa ni lo lee. Los campos de presión, temperatura BME, humedad y gas permanecen en cero en la trama.
+## Interfaces y decisiones de hardware
 
-### Funcionamiento
+- Nodo 1: MPU6050 y BME680 comparten I²C1 (PB6=SCL, PB7=SDA). El profesor aprobó expresamente esta selección de sensores I²C; el SPI del sistema se utiliza para los SX1278 en los nodos 2 y 3. Esta excepción queda documentada frente al requisito original de sensor SPI en STM32.
+- Nodo 1 RS-485: USART1 PA9/PA10, MAX485 DE=PA2 y `/RE`=PA1.
+- Nodo 1 indicadores: TX=PB13, RX/ACK=PB12 y heartbeat=PC13, que cambia cada 200 ms.
+- Nodo 2 RS-485: UART2 GPIO17/16, DE=GPIO33 y `/RE`=GPIO25.
+- Nodo 2 LoRa: SPI2 SCK=18, MISO=19, MOSI=23, NSS=5, RESET=4 y DIO0=26.
+- Nodo 3 LoRa: SPI2 SCK=18, MISO=19, MOSI=23, NSS=5, RESET=14 y DIO0=26. La TFT ST7789 comparte el bus y usa CS=15.
+- Los dos módulos MAX485 comparten A con A, B con B y GND común. La terminación/polarización depende de la topología física del bus.
 
-- El LED PC13 cambia de estado cada 200 ms como indicador de ejecución.
-- Cada segundo se lee el MPU6050, se convierten los valores a mg, mdps y centi-°C, y se transmite la trama.
-- El LED TX PB13 se activa durante la transmisión RS485.
-- Si llega el ACK correspondiente, RX PB12 se enciende durante 100 ms.
-- El timeout de ACK es 300 ms. Si no hay ACK, aumenta `watch_timeout_count`.
+### Notas de revisión de las PCB
 
-## Firmware ESP32 nodo 2
+- La PCB de nodos 1 y 2 contiene ambos módulos y se divide para formar los nodos independientes. En la revisión fabricada se observó una inversión de los indicadores TX/RX; el firmware conserva el mapa lógico acordado (TX PB13, RX PB12) y la placa recibió una corrección manual. Comprueba la continuidad del LED antes de replicar la PCB.
+- En la PCB de la estación terrena se detectó un desplazamiento de una posición en las pistas SPI del SX1278. La placa ensamblada requirió corrección manual. Antes de fabricar otra revisión, verifica con el esquemático y multímetro las redes GPIO5→NSS, GPIO23→MOSI, GPIO19→MISO y GPIO18→SCK; SCK no debe ir a DIO5.
+- Los archivos de diseño de cada placa son la fuente; los Gerbers son exportaciones. Revisa y vuelve a exportar los Gerbers después de cualquier cambio de PCB.
 
-Proyecto ESP-IDF 6.1: `FirmwareESP32`.
+## Desarrollo electrónico
 
-### Pines
+Los nodos 1 y 2 comparten una PCB que se separa para obtener los dos módulos. La estación terrena usa su propia PCB; sus fuentes editables son los proyectos KiCad y sus vistas se conservan en `Anexos`.
 
-| Función | GPIO ESP32 |
+**Esquemático de la PCB de adquisición/gateway:**
+
+![Esquemático de los nodos 1 y 2](Anexos/esquematico.png)
+
+**Diseño de PCB:**
+
+![Diseño de la PCB compartida](Anexos/diseñoPCB_1.png)
+
+**Vista 3D:**
+
+![Vista 3D de la PCB compartida](Anexos/vision3D_1.png)
+
+El hardware del nodo 3, sus figuras y el detalle de reparación de sus pistas SPI están documentados en el repositorio [EstacionTerrena](https://github.com/pavolilan2005/EstacionTerrena).
+
+### Versiones documentadas
+
+| Nodo | Firmware |
 |---|---:|
-| UART2 TX / RX al MAX485 | 17 / 16 |
-| MAX485 DE / `/RE` | 33 / 25 |
-| LED TX LoRa / LED RX LoRa | 27 / 32 |
-| LED integrado | 2 |
-| SX1278 SCK / MISO / MOSI | 18 / 19 / 23 |
-| SX1278 NSS / RESET / DIO0 | 5 / 4 / 26 |
+| 1 — STM32F411CEU6 | 1.0.4 |
+| 2 — ESP32 gateway | 1.0.3 |
+| 3 — estación terrena ESP32 | 1.0.16 |
+## Trama y validación
 
-UART2 también está a 115200, 8N1. En RS485 conecta A con A, B con B y GND común; usa el MAX485 para los dos extremos, no conectes UART directamente entre placas. Revisa terminación y polarización según longitud/topología del bus.
+Los nodos usan una trama binaria de 32 bytes: sincronía `A5 5A`, versión, tipo, secuencia, banderas, campos de sensores en punto fijo big-endian y CRC-8/ATM. Los datos con signo usan complemento a dos. El CRC cubre los bytes 2–30; sus parámetros son polinomio `0x07`, inicial `0x00`, RefIn/RefOut desactivados y XOR final `0x00`. El ACK es de seis bytes y contiene la secuencia confirmada y su CRC.
 
-El SX1278 opera a 433 MHz, SF7, BW125 kHz, CR 4/5, CRC habilitado y sync word `0x12`. La banda y el perfil deben coincidir en los otros nodos.
+La tabla de offsets, las unidades, conversiones, resolución y escalas está en [`FirmwareESP32/PROTOCOLO_BINARIO.md`](FirmwareESP32/PROTOCOLO_BINARIO.md). El nodo 2 descarta las tramas con CRC incorrecto e incrementa su contador; sus dos canales de ThingSpeak publican variables, CRC recibido/calculado y diagnóstico. El mapa exacto de campos y las instrucciones de credenciales están en [`FirmwareESP32/README.md`](FirmwareESP32/README.md).
 
-### Tareas FreeRTOS
+## ThingSpeak y credenciales
 
-- `rs485_task`: recibe bytes de UART2, separa líneas por LF y procesa las tramas completas.
-- `lora_task`: consume la muestra pendiente, transmite por LoRa y espera el acuse del nodo 3.
-- La cola LoRa tiene longitud 1. Si radio está ocupado, una trama nueva sustituye la muestra aún pendiente; aumenta `lora_frames_replaced`.
-- La respuesta RS485 se envía inmediatamente después de validar la trama, sin esperar el resultado del enlace LoRa.
+El nodo 2 se conecta en modo estación a una red Wi-Fi y publica dos canales cada 16 s. Para habilitarlo, copia `FirmwareESP32/main/cloud_secrets.h.example` como `FirmwareESP32/main/cloud_secrets.h` y completa localmente el SSID, la contraseña y las dos Write API Keys. `cloud_secrets.h` está excluido de Git. Nunca pegues las claves en el README ni en el código versionado.
 
-## Protocolo
-
-- STM32 → nodo 2: `$D,seq,ax_mg,ay_mg,az_mg,gx_mdps,gy_mdps,gz_mdps,mpu_temp_centiC,pres_Pa,bme_temp_centiC,hum_milliPct,gas_ohm*XX\r\n`
-- `XX`: XOR hexadecimal de todos los caracteres entre `$` y `*`, sin incluir delimitadores.
-- Nodo 2 → STM32: `$A,seq,OK\r\n`; se envía solo si trama, checksum y secuencia son válidos.
-- Nodo 2 → nodo 3: vuelve a enviar la trama válida terminada en CR/LF por LoRa.
-- Nodo 3 → nodo 2: ACK aceptado como `$A,seq,OK` o `ACK,seq,OK`, con secuencia igual a la transmitida.
-
-La secuencia es de 8 bits, de 0 a 255, y vuelve a 0 al desbordarse. Los campos BME en cero indican que la lectura aún no está implementada en el firmware STM32; no representan una medición ambiental real.
+El nodo 3 ofrece además un AP local para supervisar la recepción LoRa. Su SSID, credencial de laboratorio y endpoints se describen en el README de su firmware; cambia la contraseña antes de desplegarlo fuera del laboratorio.
 
 ## Compilar y cargar
 
-### STM32
+### Nodo 1 — STM32F411CEU6
 
-1. Abre el archivo `.ioc` con STM32CubeMX/CubeIDE para revisar la configuración de periféricos.
-2. Abre `MDK-ARM/SistemaAdquisicionDatos.uvprojx` en Keil MDK.
-3. Compila el target `SistemaAdquisicionDatos` y programa el STM32F411CEU6 mediante ST-Link.
+1. Abre `FirmwareSTM32/SistemaAdquisicionDatos/SistemaAdquisicionDatos.ioc` con STM32CubeMX para consultar la configuración.
+2. Abre `FirmwareSTM32/SistemaAdquisicionDatos/MDK-ARM/SistemaAdquisicionDatos.uvprojx` en Keil MDK-ARM.
+3. Selecciona el target `SistemaAdquisicionDatos`, compila y carga con ST-Link.
 
-### ESP32
+La guía de STM32CubeMX/Keil, las variables de Watch y la prueba controlada CRC están en [`FirmwareSTM32/SistemaAdquisicionDatos/README.md`](FirmwareSTM32/SistemaAdquisicionDatos/README.md). Las pruebas funcionales están resumidas en [`docs/VALIDACION.md`](docs/VALIDACION.md).
 
-Desde PowerShell con ESP-IDF 6.1 cargado:
+### Nodo 2 — ESP32
+
+Con ESP-IDF 6.1 configurado en VS Code o terminal:
 
 ```powershell
 cd FirmwareESP32
@@ -95,13 +116,21 @@ idf.py build
 idf.py -p COMx flash monitor
 ```
 
-Sustituye `COMx` por el puerto del ESP32. El log informa inicio del nodo, recepción de tramas RS485, transmisión LoRa y recepción/timeouts de ACK.
+### Nodo 3 — estación terrena ESP32
 
-## Versionado
+Consulta [README del nodo 3](https://github.com/pavolilan2005/EstacionTerrena/blob/main/Firmware_EstacionTerrena/README_ADAPTACION.md) en el repositorio `EstacionTerrena`. Usa una terminal con ESP-IDF 6.1 y sustituye `COMx` por el puerto del equipo.
 
-El número de versión de cada fuente está en su comentario inicial. Al modificar código, incrementa el PATCH del firmware correspondiente y actualiza el `project(... VERSION ...)` del CMake de ESP-IDF y esta documentación.
+## Documentación y licencia de componentes
 
-## Archivos de apoyo
+- La documentación Doxygen del nodo 2 se configura con `FirmwareESP32/Doxyfile`.
+- La documentación Doxygen del nodo 1 se configura con `FirmwareSTM32/SistemaAdquisicionDatos/Doxyfile`; ejecuta `doxygen Doxyfile` desde esa carpeta.
+- El nodo 3 cuenta con Doxygen en el [repositorio de estación terrena](https://github.com/pavolilan2005/EstacionTerrena), archivo `Firmware_EstacionTerrena/Doxyfile`.
+- El controlador BME68x de Bosch conserva su licencia en `FirmwareSTM32/SistemaAdquisicionDatos/Core/Inc/BME68x_LICENSE.txt`.
+- El STM32 HAL/CMSIS y otras dependencias conservan sus avisos de licencia originales.
 
-- [Mapa de trama, unidades y variables Keil Watch](docs/Protocolo-y-Keil-Watch.md)
-- [README del gateway ESP32](FirmwareESP32/README.md)
+## Repositorios relacionados
+
+- Sistema de adquisición y gateway: este repositorio.
+- Estación terrena: [EstacionTerrena](https://github.com/pavolilan2005/EstacionTerrena).
+
+Ambos proyectos se versionan de forma independiente. Antes de publicar, revisa el estado de Git en cada carpeta y confirma que no se incluyan claves locales ni artefactos de compilación.

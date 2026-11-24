@@ -1,3 +1,19 @@
-# Directorios generados por CMake, ESP-IDF, Ninja y otros sistemas de build.
-# No incluir estos artefactos en commits; se regeneran al compilar.
+# Archivos locales y productos generados — no versionar.
 **/build/
+**/managed_components/
+**/sdkconfig.old
+FirmwareESP32/main/cloud_secrets.h
+FirmwareESP32/.vscode/settings.json
+FirmwareSTM32/SistemaAdquisicionDatos/MDK-ARM/SistemaAdquisicionDatos/
+FirmwareSTM32/SistemaAdquisicionDatos/MDK-ARM/*.uvoptx
+FirmwareSTM32/SistemaAdquisicionDatos/MDK-ARM/*.uvguix.*
+**/*.kicad_prl
+**/*-backups/
+**/.history/
+**/~*.kicad_*.lck
+**/*.axf
+**/*.o
+**/*.d
+**/*.lnp
+**/*.map
+**/*.dep

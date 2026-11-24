@@ -1,7 +1,7 @@
 /**
  * @file main.c
  * @brief Gateway ESP32 entre RS485 del STM32 y radio LoRa al nodo 3.
- * @version 1.0.1
+ * @version 1.0.3
  *
  * Recibe y valida tramas por UART2, devuelve el ACK RS485 inmediatamente y
  * retransmite por SX1278 desde una tarea FreeRTOS independiente. Conserva la
@@ -16,6 +16,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "telemetry_protocol.h"
+#include "cloud.h"
 
 #include "driver/gpio.h"
 #include "driver/uart.h"
@@ -55,9 +57,9 @@
 #define UART_BAUD_RATE             115200
 #define UART_RX_BUFFER_SIZE        1024
 
-#define MAX_FRAME_LENGTH           180
+#define MAX_FRAME_LENGTH           TELEMETRY_DATA_LENGTH
 #define MAX_LORA_PAYLOAD           200
-#define MAX_ACK_LENGTH             40
+#define MAX_ACK_LENGTH             (TELEMETRY_ACK_LENGTH + 1U)
 
 /* Solo se conserva la trama pendiente más reciente para LoRa. */
 #define LORA_QUEUE_LENGTH          1
@@ -68,6 +70,9 @@ static QueueHandle_t lora_queue;
 
 /* Contadores visibles en el log serial */
 static volatile uint32_t rs485_valid_frames = 0U;
+static volatile uint32_t rs485_crc_errors = 0U;
+static volatile uint32_t rs485_bad_frames = 0U;
+static volatile uint32_t rs485_corrupt_frames = 0U;
 static volatile uint32_t rs485_ack_sent = 0U;
 static volatile uint32_t rs485_ack_errors = 0U;
 static volatile uint32_t lora_frames_replaced = 0U;
@@ -132,14 +137,14 @@ static void rs485_transmit_mode(void)
 }
 
 /** Envia una trama UART en modo TX y vuelve a RX al terminar. */
-static esp_err_t rs485_send(const char *data, size_t length)
+static esp_err_t rs485_send(const uint8_t *data, size_t length)
 {
     rs485_transmit_mode();
 
     /* Un tick asegura tiempo de cambio de dirección del transceptor. */
     vTaskDelay(1);
 
-    int written = uart_write_bytes(RS485_UART, data, length);
+    int written = uart_write_bytes(RS485_UART, (const char *)data, length);
     if (written < 0 || (size_t)written != length) {
         rs485_receive_mode();
         return ESP_FAIL;
@@ -471,101 +476,70 @@ static esp_err_t lora_receive_packet(uint8_t *buffer,
     return ESP_ERR_TIMEOUT;
 }
 
-/* ---------------- Validación de protocolo ---------------- */
+/* ---------------- Protocolo binario y tareas FreeRTOS ------------------ */
 
-/** Valida delimitadores, XOR y secuencia de la trama enviada por STM32. */
-static bool validate_stm32_frame(const char *line,
-                                 uint8_t *sequence)
+static uint8_t rs485_candidate[TELEMETRY_DATA_LENGTH];
+static size_t rs485_candidate_length;
+
+static void rs485_parser_resync(void)
 {
-    if (line == NULL || line[0] != '$')
-        return false;
-
-    const char *star = strchr(line, '*');
-    if (star == NULL || star <= line + 1)
-        return false;
-
-    size_t body_length = (size_t)(star - (line + 1));
-    if (body_length == 0U || body_length >= MAX_FRAME_LENGTH)
-        return false;
-
-    unsigned int received_checksum = 0U;
-    if (sscanf(star + 1, "%2x", &received_checksum) != 1)
-        return false;
-
-    uint8_t checksum = 0U;
-    for (size_t i = 0U; i < body_length; i++)
-        checksum ^= (uint8_t)line[1U + i];
-
-    if (checksum != (uint8_t)received_checksum)
-        return false;
-
-    unsigned int seq = 0U;
-    if (sscanf(line + 1, "D,%u", &seq) != 1 || seq > 255U)
-        return false;
-
-    *sequence = (uint8_t)seq;
-    return true;
+    for (size_t i = 1U; i + 1U < TELEMETRY_DATA_LENGTH; ++i) {
+        if (rs485_candidate[i] == TELEMETRY_SYNC_0 &&
+            rs485_candidate[i + 1U] == TELEMETRY_SYNC_1) {
+            size_t remaining = TELEMETRY_DATA_LENGTH - i;
+            memmove(rs485_candidate, &rs485_candidate[i], remaining);
+            rs485_candidate_length = remaining;
+            return;
+        }
+    }
+    rs485_candidate_length = 0U;
 }
 
-/** Acepta ACK de estación solo si la secuencia coincide y el estado es OK. */
-static bool validate_lora_ack(const char *ack, uint8_t expected_sequence)
+static void handle_rs485_frame(const uint8_t *frame)
 {
-    unsigned int sequence = 0U;
-    char status[8] = {0};
+    telemetry_sample_t sample = {0};
+    telemetry_decode_status_t status =
+        telemetry_decode_data(frame, TELEMETRY_DATA_LENGTH, &sample);
 
-    if (sscanf(ack, "$A,%u,%7[^,\r\n]", &sequence, status) == 2 ||
-        sscanf(ack, "ACK,%u,%7[^,\r\n]", &sequence, status) == 2) {
-        return sequence == expected_sequence &&
-               strcmp(status, "OK") == 0;
+    if (status != TELEMETRY_DECODE_OK) {
+        if (status == TELEMETRY_DECODE_BAD_CRC) {
+            ++rs485_crc_errors;
+            ++rs485_corrupt_frames;
+            ESP_LOGW(TAG,
+                     "CRC RS485 incorrecto seq=%u rx=0x%02X calc=0x%02X; descartada",
+                     (unsigned)sample.sequence,
+                     (unsigned)sample.crc_received,
+                     (unsigned)sample.crc_calculated);
+            cloud_update_sample(&sample, false, rs485_corrupt_frames);
+        } else {
+            ++rs485_bad_frames;
+            ++rs485_corrupt_frames;
+            ESP_LOGW(TAG, "Formato RS485 inválido; trama descartada");
+            cloud_update_sample(NULL, false, rs485_corrupt_frames);
+        }
+        return; /* No ACK: STM32 podrá registrar el timeout. */
     }
 
-    return false;
-}
+    ++rs485_valid_frames;
+    ESP_LOGI(TAG, "Trama RS485 válida seq=%u flags=0x%02X",
+             (unsigned)sample.sequence, (unsigned)sample.flags);
 
-/* ---------------- Tarea RS485: ACK inmediato ---------------- */
-
-/** Valida una trama, responde RS485 sin esperar LoRa y encola para retransmision. */
-static void handle_rs485_line(const char *line)
-{
-    uint8_t sequence = 0U;
-
-    if (!validate_stm32_frame(line, &sequence)) {
-        ESP_LOGW(TAG, "Trama RS485 inválida: %s", line);
-        return;
-    }
-
-    rs485_valid_frames++;
-    ESP_LOGI(TAG, "Trama STM32 válida, secuencia=%u", sequence);
-
-    /*
-     * El ACK sale de inmediato, antes de iniciar o esperar una operación LoRa.
-     */
-    char ack[24];
-    int ack_length = snprintf(ack,
-                              sizeof(ack),
-                              "$A,%u,OK\r\n",
-                              (unsigned int)sequence);
-
-    if (ack_length <= 0 || (size_t)ack_length >= sizeof(ack)) {
-        ESP_LOGE(TAG, "No se pudo construir ACK RS485");
-        return;
-    }
-
-    if (rs485_send(ack, (size_t)ack_length) == ESP_OK) {
-        rs485_ack_sent++;
+    /* ACK de RS-485 inmediato, antes de realizar cualquier operación LoRa. */
+    uint8_t ack[TELEMETRY_ACK_LENGTH];
+    telemetry_make_ack(sample.sequence, ack);
+    if (rs485_send(ack, sizeof(ack)) == ESP_OK) {
+        ++rs485_ack_sent;
     } else {
-        rs485_ack_errors++;
-        ESP_LOGE(TAG, "Error enviando ACK RS485");
+        ++rs485_ack_errors;
+        ESP_LOGE(TAG, "Error enviando ACK binario por RS485");
     }
 
-    /*
-     * Si LoRa está ocupado y ya hay una trama pendiente, se reemplaza
-     * por la muestra más reciente.
-     */
-    if (uxQueueMessagesWaiting(lora_queue) > 0U)
-        lora_frames_replaced++;
+    cloud_update_sample(&sample, true, rs485_corrupt_frames);
 
-    if (xQueueOverwrite(lora_queue, line) != pdPASS)
+    /* La cola conserva la muestra más reciente mientras LoRa espera respuesta. */
+    if (uxQueueMessagesWaiting(lora_queue) > 0U)
+        ++lora_frames_replaced;
+    if (xQueueOverwrite(lora_queue, frame) != pdPASS)
         ESP_LOGE(TAG, "No se pudo encolar trama LoRa");
 
     gpio_set_level(LED_ONBOARD_GPIO, 1);
@@ -573,131 +547,109 @@ static void handle_rs485_line(const char *line)
     gpio_set_level(LED_ONBOARD_GPIO, 0);
 }
 
-/** Tarea FreeRTOS que delimita lineas UART por LF y procesa tramas RS485. */
-static void rs485_task(void *arg)
+static void rs485_parser_feed(uint8_t byte)
 {
-    (void)arg;
-
-    char line[MAX_FRAME_LENGTH];
-    size_t used = 0U;
-    uint8_t byte = 0U;
-
-    while (1) {
-        int count = uart_read_bytes(RS485_UART,
-                                    &byte,
-                                    1U,
-                                    pdMS_TO_TICKS(100));
-
-        if (count <= 0)
-            continue;
-
-        if (byte == '\r')
-            continue;
-
-        if (byte == '\n') {
-            line[used] = '\0';
-
-            if (used > 0U)
-                handle_rs485_line(line);
-
-            used = 0U;
-            continue;
+    if (rs485_candidate_length == 0U) {
+        if (byte == TELEMETRY_SYNC_0) {
+            rs485_candidate[0] = byte;
+            rs485_candidate_length = 1U;
         }
+        return;
+    }
 
-        if (used < sizeof(line) - 1U) {
-            line[used++] = (char)byte;
+    if (rs485_candidate_length == 1U) {
+        if (byte == TELEMETRY_SYNC_1) {
+            rs485_candidate[1] = byte;
+            rs485_candidate_length = 2U;
+        } else if (byte == TELEMETRY_SYNC_0) {
+            rs485_candidate[0] = byte;
         } else {
-            ESP_LOGW(TAG, "Trama RS485 excedió el buffer");
-            used = 0U;
+            rs485_candidate_length = 0U;
+        }
+        return;
+    }
+
+    rs485_candidate[rs485_candidate_length++] = byte;
+    if (rs485_candidate_length == TELEMETRY_DATA_LENGTH) {
+        if (rs485_candidate[0] == TELEMETRY_SYNC_0 &&
+            rs485_candidate[1] == TELEMETRY_SYNC_1) {
+            handle_rs485_frame(rs485_candidate);
+            rs485_candidate_length = 0U;
+        } else {
+            ++rs485_bad_frames;
+            ++rs485_corrupt_frames;
+            cloud_update_sample(NULL, false, rs485_corrupt_frames);
+            rs485_parser_resync();
         }
     }
 }
 
-/* ---------------- Tarea LoRa: envío y ACK ---------------- */
+/** Recibe el flujo UART y reconstruye tramas fijas de 32 bytes por sync. */
+static void rs485_task(void *arg)
+{
+    (void)arg;
+    uint8_t bytes[64];
 
-/** Tarea FreeRTOS que envia muestras LoRa y espera el ACK de la estacion. */
+    for (;;) {
+        int count = uart_read_bytes(RS485_UART, bytes, sizeof(bytes),
+                                    pdMS_TO_TICKS(100));
+        for (int i = 0; i < count; ++i)
+            rs485_parser_feed(bytes[i]);
+    }
+}
+
+/** Envía por SX1278 el paquete binario validado y valida el ACK CRC de nodo 3. */
 static void lora_task(void *arg)
 {
     (void)arg;
-
-    char frame[MAX_FRAME_LENGTH];
-    char payload[MAX_LORA_PAYLOAD + 1];
-    uint8_t ack[MAX_ACK_LENGTH];
+    uint8_t frame[TELEMETRY_DATA_LENGTH];
+    uint8_t ack[TELEMETRY_ACK_LENGTH + 1U];
     size_t ack_length = 0U;
 
-    while (1) {
-        if (xQueueReceive(lora_queue,
-                          frame,
-                          portMAX_DELAY) != pdPASS) {
+    for (;;) {
+        if (xQueueReceive(lora_queue, frame, portMAX_DELAY) != pdPASS)
             continue;
-        }
 
-        int payload_length = snprintf(payload,
-                                      sizeof(payload),
-                                      "%s\r\n",
-                                      frame);
+        uint8_t sent_sequence = frame[4];
+        ESP_LOGI(TAG, "Enviando secuencia %u por LoRa",
+                 (unsigned)sent_sequence);
 
-        if (payload_length <= 0 ||
-            (size_t)payload_length >= sizeof(payload)) {
-            ESP_LOGE(TAG, "Trama demasiado larga para LoRa");
-            lora_tx_errors++;
-            continue;
-        }
-
-        unsigned int sent_sequence = 0U;
-        if (sscanf(frame, "$D,%u", &sent_sequence) != 1 ||
-            sent_sequence > 255U) {
-            ESP_LOGE(TAG, "No se pudo leer la secuencia de la trama");
-            continue;
-        }
-
-        ESP_LOGI(TAG, "Enviando secuencia por LoRa: %s", frame);
-
-        esp_err_t err = lora_send_packet(
-            (const uint8_t *)payload,
-            (size_t)payload_length);
-
+        esp_err_t err = lora_send_packet(frame, sizeof(frame));
         if (err != ESP_OK) {
-            lora_tx_errors++;
+            ++lora_tx_errors;
             ESP_LOGE(TAG, "Fallo TX LoRa: %s", esp_err_to_name(err));
             continue;
         }
 
         ack_length = 0U;
-        err = lora_receive_packet(ack,
-                                  sizeof(ack),
-                                  &ack_length,
+        err = lora_receive_packet(ack, sizeof(ack), &ack_length,
                                   LORA_ACK_TIMEOUT_MS);
-
         if (err == ESP_ERR_TIMEOUT) {
-            lora_ack_timeouts++;
-            ESP_LOGW(TAG, "Timeout esperando ACK LoRa");
+            ++lora_ack_timeouts;
+            ESP_LOGW(TAG, "Timeout esperando ACK LoRa seq=%u",
+                     (unsigned)sent_sequence);
             continue;
         }
-
         if (err != ESP_OK) {
+            ++lora_tx_errors;
             ESP_LOGE(TAG, "Error recibiendo ACK LoRa: %s",
                      esp_err_to_name(err));
             continue;
         }
 
-        ESP_LOGI(TAG, "Respuesta LoRa recibida: %s", (char *)ack);
-
-        if (validate_lora_ack((char *)ack, (uint8_t)sent_sequence)) {
-            lora_ack_received++;
+        if (telemetry_validate_ack(ack, ack_length, sent_sequence)) {
+            ++lora_ack_received;
             gpio_set_level(LED_LORA_RX_GPIO, 1);
             vTaskDelay(pdMS_TO_TICKS(50));
             gpio_set_level(LED_LORA_RX_GPIO, 0);
-
-            ESP_LOGI(TAG, "ACK LoRa válido para secuencia %u",
-                     sent_sequence);
+            ESP_LOGI(TAG, "ACK LoRa válido seq=%u",
+                     (unsigned)sent_sequence);
         } else {
-            ESP_LOGW(TAG, "ACK LoRa inválido para secuencia %u",
-                     sent_sequence);
+            ESP_LOGW(TAG, "ACK LoRa inválido seq=%u len=%u",
+                     (unsigned)sent_sequence, (unsigned)ack_length);
         }
     }
 }
-
 /* ---------------- Inicialización de hardware ---------------- */
 
 /** Configura GPIO de LEDs, direccion RS485, reset LoRa y DIO0. */
@@ -800,12 +752,13 @@ static void init_lora_spi(void)
 /** Punto de entrada: inicializa periféricos, cola y tareas del gateway. */
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Firmware nodo 2 v1.0.1");
+    ESP_LOGI(TAG, "Firmware nodo 2 v1.0.3");
     init_gpio();
     init_uart_rs485();
     init_lora_spi();
 
     ESP_ERROR_CHECK(lora_init());
+    (void)cloud_start();
 
     lora_queue = xQueueCreate(LORA_QUEUE_LENGTH,
                               MAX_FRAME_LENGTH);
@@ -835,5 +788,5 @@ void app_main(void)
         abort();
     }
 
-    ESP_LOGI(TAG, "Nodo 2 iniciado: DE=GPIO33, RE=GPIO25");
+    ESP_LOGI(TAG, "Nodo 2 v1.0.3 iniciado: trama binaria 32 B, DE=GPIO33, /RE=GPIO25");
 }
